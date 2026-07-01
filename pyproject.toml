@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recce"
+version = "0.1.0"
+description = "An autonomous reconnaissance agent for authorized targets: plan → enumerate → hypothesize → draft write-up. Recon only, human-gated."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+recce = "recce.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["recce*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
