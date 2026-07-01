@@ -12,6 +12,10 @@ and drafts a `recon → finding → impact → remediation` write-up.
 > on systems you own or are explicitly permitted to test (HTB/CTF machines, your
 > own lab, a sanctioned engagement).
 
+> **Built with AI assistance.** I designed and directed this project and its
+> architecture; the implementation was written with an AI coding assistant
+> (Claude Code).
+
 ## Why it's an *agent*, not a script
 
 The model isn't called once — it drives a loop, and three things make that
