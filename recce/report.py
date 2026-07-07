@@ -57,6 +57,23 @@ def render_writeup(run: ReconRun) -> str:
         for p in f.open_ports:
             out.append(f"| {p.port} | {p.service} | {p.version or '—'} |")
 
+    s = f.surface
+    if s and (s.subdomains or s.live_hosts or s.priority_hosts or s.notable_urls or s.waf_notes):
+        out.append("\n## Attack surface")
+        if s.waf_notes:
+            out.append(f"- **WAF/CDN:** {s.waf_notes}")
+        if s.subdomains:
+            out.append(f"- **Subdomains discovered ({len(s.subdomains)}):** "
+                       + ", ".join(s.subdomains[:25])
+                       + (" …" if len(s.subdomains) > 25 else ""))
+        if s.live_hosts:
+            out.append(f"- **Live hosts ({len(s.live_hosts)}):** " + ", ".join(s.live_hosts[:25]))
+        if s.priority_hosts:
+            out += ["- **Priority hosts (test first):**",
+                    *[f"  - `{h}`" for h in s.priority_hosts]]
+        if s.notable_urls:
+            out += ["- **Notable URLs:**", *[f"  - `{u}`" for u in s.notable_urls[:15]]]
+
     out.append("\n## Foothold hypotheses (ranked)")
     if not f.hypotheses:
         out.append("_No hypotheses formed._")

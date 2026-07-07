@@ -1,9 +1,15 @@
 # recce
 
 An **autonomous reconnaissance agent** for authorized targets. Point it at a box
-you're allowed to test; it runs a real agent loop — plan → enumerate with
-read-only tools → reason over what it finds → form ranked foothold hypotheses —
-and drafts a `recon → finding → impact → remediation` write-up.
+or a domain you're allowed to test; it runs a real agent loop — plan → enumerate
+with read-only tools → reason over what it finds → form ranked foothold
+hypotheses — and drafts a `recon → finding → impact → remediation` write-up.
+
+It reads the target's shape and reconnoiters accordingly: a **single host/IP**
+(an HTB/CTF box) gets drilled service-by-service; a **domain** (a bug-bounty
+program) gets its wide surface mapped **passive-first** — subdomains from public
+cert/DNS data, interesting-host triage, a bot-WAF pre-check, then a gentle
+alive-probe — the way real bounty recon works.
 
 > ⚠️ **Reconnaissance only. Authorized targets only.** recce enumerates and
 > *proposes*; it never exploits. The loop stops at "here's the attack path and
@@ -67,6 +73,8 @@ recce replay runs/<id>.json --journal  # the step-by-step reasoning trail
 
 ## The recon tools (all read-only)
 
+**Host tools** — drill a single box:
+
 | Tool | What it does |
 |---|---|
 | `nmap_scan` | service/version scan (`nmap -sV`) |
@@ -75,25 +83,43 @@ recce replay runs/<id>.json --journal  # the step-by-step reasoning trail
 | `smb_enum` | list SMB shares via a null session |
 | `service_intel` | look up known common misconfigs + enumeration steps for a service (grounds hypotheses in fact, not invention) |
 
-Real tools shell out and **degrade gracefully** when a binary or the network
-isn't there. `--simulate` swaps in canned outputs for a coherent demo box, so the
-whole loop runs with no network, no nmap, and no root.
+**Web tools** — map the wide surface of a domain, bug-bounty style, and respect
+`THE LINE` (passive reads are safe anywhere; active probes are in-scope-only and
+gentle):
+
+| Tool | Line | What it does |
+|---|---|---|
+| `subdomain_enum` | passive | subdomains from cert transparency (crt.sh) + passive DNS (hackertarget) |
+| `triage_hosts` | *no network* | rank hosts by attack-surface interest — dev/stage/api/admin/internal/vpn float up; the apex brand never inflates the score |
+| `waf_check` | active (1 req) | fingerprint a bot-WAF/CDN before investing time; heavy WAF ⇒ deprioritise |
+| `http_probe` | active, gentle | which hosts are alive — status, Server, title; capped + short-timeout |
+| `wayback_urls` | passive | historical URLs from the Wayback CDX, interesting ones surfaced |
+
+Web tools are pure stdlib (no extra binaries) and verify TLS with a real CA
+bundle (`certifi`) so passive HTTPS recon works on any machine. Host tools shell
+out and **degrade gracefully** when a binary or the network isn't there.
+`--simulate` swaps in canned outputs for a coherent demo (a host box *and* a demo
+domain), so the whole loop runs with no network, no nmap, and no root.
 
 ## Layout
 
 ```
 recce/
-  types.py         Pydantic model: Port / Hypothesis / ReconFindings / Step / ReconRun
+  types.py         Pydantic model: Port / Surface / Hypothesis / ReconFindings / Step / ReconRun
   tools.py         Tool + ToolRegistry (the reusable agent-core hands)
   agent.py         the loop: plan → tool-use → observe → conclude, with recovery
-  recon/tools.py   read-only recon tools + service-intel + simulate mode
-  report.py        render the write-up and the reasoning trail
+  recon/tools.py   host recon tools (nmap/ftp/smb) + service-intel + simulate mode
+  recon/web.py     web-surface recon (subdomain/triage/probe/waf/wayback), passive-first
+  report.py        render the write-up (incl. the attack-surface map) and the trail
   cli.py           recce scan | replay  (with the authorization gate)
 tests/             offline suite — fake model + simulated tools
 ```
 
 ## Status
 
-v0.1 — agent core (loop, tool registry, journal), recon toolset with a simulate
-mode, write-up renderer, CLI with an authorization gate, tested offline. Next:
-more enumeration tools, a live HTB run, and tightening the hypothesis prompt.
+v0.2 — agent core (loop, tool registry, journal); **two recon halves** (host
+drill + passive-first web-surface mapping) in one registry the agent picks from by
+target shape; structured hand-off with an attack-surface map; write-up renderer;
+CLI with an authorization gate; tested offline (22 tests). Next: a live HTB run,
+optional subfinder/amass depth with API keys, and tightening the hypothesis
+prompt.

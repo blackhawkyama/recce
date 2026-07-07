@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "recce"
-version = "0.1.0"
+version = "0.2.0"
 description = "An autonomous reconnaissance agent for authorized targets: plan → enumerate → hypothesize → draft write-up. Recon only, human-gated."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2",
     "anthropic>=0.40",
+    "certifi>=2024.0",  # a real CA bundle so passive HTTPS recon verifies everywhere
 ]
 
 [project.optional-dependencies]
