@@ -196,9 +196,10 @@ def _title_of(body: str) -> str:
 # --- passive discovery ----------------------------------------------------
 
 
-def subdomain_enum(domain: str) -> str:
-    """PASSIVE. Aggregate subdomains from certificate transparency (crt.sh) and
-    passive DNS (hackertarget). Reads public data only — safe on any domain."""
+def collect_subdomains(domain: str) -> tuple[list[str], list[str]]:
+    """PASSIVE core: aggregate subdomains from crt.sh (cert transparency) +
+    hackertarget (passive DNS). Returns (sorted subdomains, sources that answered).
+    Reads public data only — safe on any domain. Shared by the tool and `sweep`."""
     domain = domain.strip().lower().lstrip("*.")
     found: set[str] = set()
     sources: list[str] = []
@@ -225,22 +226,36 @@ def subdomain_enum(domain: str) -> str:
                 found.add(host)
         sources.append("hackertarget")
 
-    if not found:
+    return sorted(found), sources
+
+
+def subdomain_enum(domain: str) -> str:
+    """PASSIVE. Aggregate subdomains from certificate transparency (crt.sh) and
+    passive DNS (hackertarget). Reads public data only — safe on any domain."""
+    domain = domain.strip().lower().lstrip("*.")
+    subs, sources = collect_subdomains(domain)
+    if not subs:
         return (
             f"No subdomains recovered for {domain} "
             f"(sources tried: crt.sh, hackertarget). The passive sources may be "
             "rate-limiting — retry, or add subfinder/amass with API keys for depth."
         )
-    subs = sorted(found)
     head = f"{len(subs)} subdomains for {domain} (via {', '.join(sources) or 'none'}):"
     shown = subs[:120]
     tail = "" if len(subs) <= 120 else f"\n…(+{len(subs) - 120} more)"
     return head + "\n" + "\n".join(shown) + tail
 
 
-def wayback_urls(domain: str, limit: int = 200) -> str:
-    """PASSIVE. Historical URLs from the Wayback Machine CDX index, with the
-    interesting ones (params, api, admin, uploads, config, backups) surfaced."""
+_JUICY_URL = re.compile(
+    r"(\?|=|/api/|/v\d/|admin|internal|upload|/config|\.json|\.xml|\.sql|"
+    r"\.bak|\.old|\.zip|\.env|token|key|secret|debug|graphql|swagger|\.git)",
+    re.I,
+)
+
+
+def collect_wayback(domain: str, limit: int = 200) -> tuple[list[str], list[str]]:
+    """PASSIVE core: pull historical URLs from the Wayback CDX index. Returns
+    (all urls, the interesting subset). Empty lists if CDX has nothing / is down."""
     domain = domain.strip().lower().lstrip("*.")
     limit = max(1, min(int(limit), 500))
     url = (
@@ -249,20 +264,22 @@ def wayback_urls(domain: str, limit: int = 200) -> str:
     )
     status, _, body = _get(url, timeout=25, read=1 << 20)
     if status != 200 or not body.strip().startswith("["):
-        return f"No Wayback data for {domain} (status {status}). CDX may be rate-limiting; retry."
+        return [], []
     try:
         rows = json.loads(body)
     except Exception:  # noqa: BLE001
-        return f"Wayback returned unparseable data for {domain}."
+        return [], []
     urls = [r[0] for r in rows[1:] if r]  # row 0 is the header
+    return urls, [u for u in urls if _JUICY_URL.search(u)]
+
+
+def wayback_urls(domain: str, limit: int = 200) -> str:
+    """PASSIVE. Historical URLs from the Wayback Machine CDX index, with the
+    interesting ones (params, api, admin, uploads, config, backups) surfaced."""
+    domain = domain.strip().lower().lstrip("*.")
+    urls, hot = collect_wayback(domain, limit)
     if not urls:
-        return f"Wayback has no archived URLs for {domain}."
-    juicy = re.compile(
-        r"(\?|=|/api/|/v\d/|admin|internal|upload|/config|\.json|\.xml|\.sql|"
-        r"\.bak|\.old|\.zip|\.env|token|key|secret|debug|graphql|swagger|\.git)",
-        re.I,
-    )
-    hot = [u for u in urls if juicy.search(u)]
+        return f"No Wayback data for {domain} (empty or CDX rate-limiting; retry)."
     lines = [f"{len(urls)} historical URLs for {domain}; {len(hot)} look interesting:"]
     for u in hot[:60]:
         lines.append(f"  ★ {u}")
@@ -285,6 +302,22 @@ def _subdomain_part(host: str) -> str:
     return ".".join(labels[:-2]) if len(labels) > 2 else ""
 
 
+def rank_hosts(hosts: list[str]) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """DETERMINISTIC core: split hosts into (tagged, plain). `tagged` is a list of
+    (host, matched-keywords) sorted most-interesting-first; `plain` is the rest.
+    Only subdomain labels are inspected, so the apex brand never inflates a score."""
+    tagged: list[tuple[str, list[str]]] = []
+    plain: list[str] = []
+    for h in hosts:
+        hits = sorted({m.group(0).lower() for m in _INTERESTING.finditer(_subdomain_part(h))})
+        if hits:
+            tagged.append((h, hits))
+        else:
+            plain.append(h)
+    tagged.sort(key=lambda t: (-len(t[1]), t[0]))
+    return tagged, plain
+
+
 def triage_hosts(hosts: str) -> str:
     """DETERMINISTIC. Rank hostnames by attack-surface interest — dev/stage/api/
     admin/internal/vpn/git and friends float to the top. Only the subdomain labels
@@ -293,12 +326,7 @@ def triage_hosts(hosts: str) -> str:
     parsed = _split_hosts(hosts)
     if not parsed:
         return "No hostnames parsed from input."
-    tagged: list[tuple[str, list[str]]] = []
-    plain: list[str] = []
-    for h in parsed:
-        hits = sorted({m.group(0).lower() for m in _INTERESTING.finditer(_subdomain_part(h))})
-        (tagged if hits else plain).append((h, hits) if hits else h)  # type: ignore[arg-type]
-    tagged.sort(key=lambda t: (-len(t[1]), t[0]))
+    tagged, plain = rank_hosts(parsed)
     lines = [f"{len(parsed)} hosts · {len(tagged)} interesting, {len(plain)} ordinary."]
     if tagged:
         lines.append("\nPRIORITISE (forgotten / pre-prod / privileged surface):")
@@ -350,46 +378,61 @@ def http_probe(targets: str, limit: int = 40) -> str:
     return "\n".join(lines)
 
 
-def waf_check(target: str) -> ToolResult:
-    """ACTIVE (in-scope only, one request). Fingerprint a bot-WAF/CDN before you
-    invest time — Phase 0.5 of the playbook. A heavy WAF (DataDome, Imperva, PX,
-    Akamai) as a beginner target ⇒ deprioritise."""
-    host = _split_hosts(target)
-    if not host:
-        return ToolResult(name="waf_check", ok=False, error="no host parsed from input")
-    h = host[0]
+def fingerprint_waf(host: str) -> dict:
+    """ACTIVE core (one GET, in-scope only). Fingerprint a bot-WAF/CDN and read
+    liveness in a single request. Returns a structured dict:
+      {host, scheme, status, server, detected[], heavy[], challenge, verdict}
+    or {host, error} if unreachable. Shared by the tool and `recce vet`."""
+    parsed = _split_hosts(host)
+    if not parsed:
+        return {"host": host, "error": "no host parsed from input"}
+    h = parsed[0]
+    scheme = "https"
     status, headers, _ = _get(f"https://{h}/", timeout=8)
     if status is None:
+        scheme = "http"
         status, headers, _ = _get(f"http://{h}/", timeout=8)
     if status is None:
-        return ToolResult(name="waf_check", ok=False, error=f"{h} unreachable on https/http")
+        return {"host": h, "error": "unreachable on https/http"}
 
     hdr_blob = " ".join(f"{k}: {v}" for k, v in headers.items()).lower()
     cookie_blob = headers.get("set-cookie", "").lower()
-    server = headers.get("server", "").lower()
+    server_l = headers.get("server", "").lower()
     detected: list[str] = []
     for vendor, kind, needle in _WAF_SIGS:
-        blob = {"header": hdr_blob, "cookie": cookie_blob, "server": server}[kind]
+        blob = {"header": hdr_blob, "cookie": cookie_blob, "server": server_l}[kind]
         if needle in blob and vendor not in detected:
             detected.append(vendor)
 
     challenge = status in (401, 403, 429, 503)
     heavy = [v for v in detected if v in _HEAVY_WAF]
-    if detected:
-        verdict = (
-            f"HEAVY bot-WAF ({', '.join(heavy)}) — deprioritise; it'll eat your time."
-            if heavy
-            else f"WAF/CDN present ({', '.join(detected)}) — usually workable, proceed."
-        )
+    if heavy:
+        verdict = f"HEAVY bot-WAF ({', '.join(heavy)}) — deprioritise; it'll eat your time."
+    elif detected:
+        verdict = f"WAF/CDN present ({', '.join(detected)}) — usually workable, proceed."
     elif challenge:
         verdict = f"No named WAF, but status {status} looks like a challenge — probe carefully."
     else:
         verdict = "No bot-WAF fingerprinted — clean path, good target."
+    return {
+        "host": h, "scheme": scheme, "status": status,
+        "server": headers.get("server", ""), "detected": detected,
+        "heavy": heavy, "challenge": challenge, "verdict": verdict,
+    }
+
+
+def waf_check(target: str) -> ToolResult:
+    """ACTIVE (in-scope only, one request). Fingerprint a bot-WAF/CDN before you
+    invest time — Phase 0.5 of the playbook. A heavy WAF (DataDome, Imperva, PX,
+    Akamai) as a beginner target ⇒ deprioritise."""
+    info = fingerprint_waf(target)
+    if "error" in info:
+        return ToolResult(name="waf_check", ok=False, error=f"{info['host']}: {info['error']}")
     out = (
-        f"{h}  GET / -> {status}\n"
-        f"  server: {headers.get('server', '(none)')}\n"
-        f"  detected: {', '.join(detected) or 'none'}\n"
-        f"  verdict: {verdict}"
+        f"{info['host']}  GET / -> {info['status']}\n"
+        f"  server: {info['server'] or '(none)'}\n"
+        f"  detected: {', '.join(info['detected']) or 'none'}\n"
+        f"  verdict: {info['verdict']}"
     )
     return ToolResult(name="waf_check", ok=True, output=out)
 

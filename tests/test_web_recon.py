@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from recce.agent import Agent
 from recce.recon.tools import build_registry
-from recce.recon.web import _split_hosts, triage_hosts
+from recce.recon.web import _split_hosts, rank_hosts, triage_hosts
 from recce.report import render_writeup
 from recce.types import ReconFindings, Surface
 
@@ -61,6 +63,110 @@ def test_split_hosts_normalises_urls_and_dedups():
 
 def test_triage_empty_input():
     assert "No hostnames" in triage_hosts("   ")
+
+
+def test_rank_hosts_structured():
+    tagged, plain = rank_hosts(["api.x.com", "www.x.com", "dev-admin.x.com"])
+    assert plain == ["www.x.com"]
+    assert tagged[0][0] == "dev-admin.x.com"  # two tags → ranked first
+    assert set(tagged[0][1]) == {"dev", "admin"}
+
+
+# --- keyless passive sweep (CLI, offline via monkeypatch) -----------------
+
+
+def test_cmd_sweep_writes_surface_writeup(tmp_path, monkeypatch):
+    import recce.recon.web as web
+    from recce.cli import build_parser
+
+    monkeypatch.setattr(web, "collect_subdomains",
+                        lambda d: (["api.x.com", "www.x.com", "vpn.x.com"], ["crt.sh"]))
+    monkeypatch.setattr(web, "collect_wayback",
+                        lambda d, limit=200: (["https://x.com/a"], ["https://x.com/admin?id=1"]))
+    args = build_parser().parse_args(["sweep", "x.com", "-o", str(tmp_path)])
+    assert args.func(args) == 0
+    md = next(tmp_path.glob("*-sweep-*.md")).read_text()
+    assert "## Attack surface" in md
+    assert "api.x.com" in md and "vpn.x.com" in md
+    assert "admin?id=1" in md
+    assert next(tmp_path.glob("*-sweep-*.json")).exists()
+
+
+def test_cmd_sweep_nothing_found_returns_1(tmp_path, monkeypatch):
+    import recce.recon.web as web
+    from recce.cli import build_parser
+
+    monkeypatch.setattr(web, "collect_subdomains", lambda d: ([], []))
+    args = build_parser().parse_args(["sweep", "x.com", "-o", str(tmp_path), "--no-wayback"])
+    assert args.func(args) == 1
+
+
+# --- fingerprint_waf core + `vet` triage (offline via monkeypatch) --------
+
+
+def test_fingerprint_waf_reads_headers(monkeypatch):
+    import recce.recon.web as web
+
+    def fake_get(url, timeout=8, read=4096):
+        return 403, {"server": "cloudflare", "cf-ray": "abc", "set-cookie": "__cf_bm=x"}, ""
+
+    monkeypatch.setattr(web, "_get", fake_get)
+    info = web.fingerprint_waf("api.x.com")
+    assert info["status"] == 403 and "Cloudflare" in info["detected"]
+    assert info["challenge"] is True
+
+
+def test_fingerprint_waf_unreachable(monkeypatch):
+    import recce.recon.web as web
+    monkeypatch.setattr(web, "_get", lambda url, timeout=8, read=4096: (None, {}, "(err)"))
+    assert "error" in web.fingerprint_waf("dead.x.com")
+
+
+def _fake_fp(host):
+    # dev-* is clean/alive; admin-* is Cloudflare-guarded; ghost-* is dead.
+    if host.startswith("ghost"):
+        return {"host": host, "error": "unreachable on https/http"}
+    if host.startswith("admin"):
+        return {"host": host, "scheme": "https", "status": 403, "server": "cloudflare",
+                "detected": ["Cloudflare"], "heavy": [], "challenge": True, "verdict": "waf"}
+    return {"host": host, "scheme": "https", "status": 200, "server": "nginx",
+            "detected": [], "heavy": [], "challenge": False, "verdict": "clean"}
+
+
+def test_vet_requires_authorized(tmp_path):
+    from recce.cli import build_parser
+    args = build_parser().parse_args(["vet", "x.com", "-o", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        args.func(args)
+
+
+def test_vet_from_domain_triages_and_writes(tmp_path, monkeypatch):
+    import recce.recon.web as web
+    from recce.cli import build_parser
+
+    monkeypatch.setattr(web, "collect_subdomains",
+                        lambda d: (["dev.x.com", "admin.x.com", "ghost.x.com", "www.x.com"], ["crt.sh"]))
+    monkeypatch.setattr(web, "fingerprint_waf", _fake_fp)
+    args = build_parser().parse_args(["vet", "x.com", "--authorized", "-o", str(tmp_path)])
+    assert args.func(args) == 0
+    md = next(tmp_path.glob("*-vet-*.md")).read_text()
+    assert "WAF triage detail" in md
+    assert "Clean & alive" in md and "dev.x.com" in md
+    assert "Cloudflare" in md  # admin host shows guarded
+
+
+def test_vet_exclude_filters_out_of_scope(tmp_path, monkeypatch):
+    import recce.recon.web as web
+    from recce.cli import build_parser
+
+    seen = []
+    monkeypatch.setattr(web, "collect_subdomains",
+                        lambda d: (["dev.x.com", "customer.isp.x.com"], ["crt.sh"]))
+    monkeypatch.setattr(web, "fingerprint_waf", lambda h: seen.append(h) or _fake_fp(h))
+    args = build_parser().parse_args(
+        ["vet", "x.com", "--authorized", "--exclude", "customer.", "-o", str(tmp_path)])
+    assert args.func(args) == 0
+    assert "dev.x.com" in seen and not any("customer." in h for h in seen)
 
 
 # --- web tools are wired into the registry --------------------------------

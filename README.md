@@ -55,6 +55,23 @@ recce scan demo --simulate
 recce scan 10.10.10.10 --authorized
 ```
 
+### Keyless recon (no model, no API key)
+
+Two commands run the passive/gentle recon pipeline directly — handy for unattended
+sweeps and for feeding a bug-bounty hunt:
+
+```bash
+# PASSIVE surface map — crt.sh + passive DNS + Wayback + triage. Safe on any domain.
+recce sweep example.com
+
+# ACTIVE-but-gentle WAF + liveness triage of the priority hosts from a sweep.
+# One GET per host; --authorized gated; --exclude drops out-of-scope patterns.
+recce vet runs/example.com-sweep-*.json --authorized --limit 20 --exclude customer.
+```
+
+`sweep → vet` gives you a ranked, WAF-vetted target list (clean & alive hosts to
+test first) before you spend a minute in Burp.
+
 Every run saves a JSON artifact and a Markdown write-up under `runs/`. Re-render
 either later:
 
