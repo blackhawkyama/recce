@@ -18,6 +18,7 @@ import subprocess
 from typing import Optional
 from urllib.request import Request, urlopen
 
+from recce.recon.web import build_web_tools
 from recce.tools import Tool, ToolRegistry
 from recce.types import ToolResult
 
@@ -263,40 +264,44 @@ _SIM_FTP = (
 
 
 def build_registry(simulate: bool = False) -> ToolRegistry:
-    """Assemble the recon toolset. `simulate=True` uses canned outputs."""
-    if simulate:
-        reg = ToolRegistry(
-            [
-                Tool("nmap_scan", "Service/version scan of the target (read-only).",
-                     SCHEMA_NMAP, lambda target, ports=None: _SIM_NMAP.format(target=target)),
-                Tool("http_enum", "Inspect an HTTP(S) service: headers, title, common paths.",
-                     SCHEMA_HTTP, lambda target, port=80: _SIM_HTTP),
-                Tool("ftp_anon", "Test anonymous FTP login and list the root (read-only).",
-                     SCHEMA_FTP, lambda target, port=21: _SIM_FTP),
-                Tool("smb_enum", "List SMB shares via a null session (read-only).",
-                     SCHEMA_SMB, lambda target: ToolResult(
-                         name="smb_enum", ok=False, error="no SMB service on this host")),
-                Tool("service_intel",
-                     "Look up known common misconfigurations and enumeration steps "
-                     "for a service. Use this to ground hypotheses.",
-                     SCHEMA_INTEL, service_intel),
-            ]
-        )
-        return reg
+    """Assemble the recon toolset. `simulate=True` uses canned outputs.
 
-    return ToolRegistry(
-        [
-            Tool("nmap_scan", "Service/version scan of the target (read-only nmap -sV).",
-                 SCHEMA_NMAP, nmap_scan),
+    Two halves share one registry so the agent can pick by target shape: the
+    *host* tools (nmap/http_enum/ftp/smb) drill a single box (an HTB/CTF machine,
+    an IP); the *web* tools (subdomain_enum/triage_hosts/http_probe/waf_check/
+    wayback_urls) map the wide surface of a domain, bug-bounty style. See
+    recon/web.py for the passive/active line on the web tools.
+    """
+    if simulate:
+        host_tools = [
+            Tool("nmap_scan", "Service/version scan of the target (read-only).",
+                 SCHEMA_NMAP, lambda target, ports=None: _SIM_NMAP.format(target=target)),
             Tool("http_enum", "Inspect an HTTP(S) service: headers, title, common paths.",
-                 SCHEMA_HTTP, http_enum),
+                 SCHEMA_HTTP, lambda target, port=80: _SIM_HTTP),
             Tool("ftp_anon", "Test anonymous FTP login and list the root (read-only).",
-                 SCHEMA_FTP, ftp_anon),
+                 SCHEMA_FTP, lambda target, port=21: _SIM_FTP),
             Tool("smb_enum", "List SMB shares via a null session (read-only).",
-                 SCHEMA_SMB, smb_enum),
+                 SCHEMA_SMB, lambda target: ToolResult(
+                     name="smb_enum", ok=False, error="no SMB service on this host")),
             Tool("service_intel",
-                 "Look up known common misconfigurations and enumeration steps for a "
-                 "service. Use this to ground hypotheses.",
+                 "Look up known common misconfigurations and enumeration steps "
+                 "for a service. Use this to ground hypotheses.",
                  SCHEMA_INTEL, service_intel),
         ]
-    )
+        return ToolRegistry(host_tools + build_web_tools(simulate=True))
+
+    host_tools = [
+        Tool("nmap_scan", "Service/version scan of the target (read-only nmap -sV).",
+             SCHEMA_NMAP, nmap_scan),
+        Tool("http_enum", "Inspect an HTTP(S) service: headers, title, common paths.",
+             SCHEMA_HTTP, http_enum),
+        Tool("ftp_anon", "Test anonymous FTP login and list the root (read-only).",
+             SCHEMA_FTP, ftp_anon),
+        Tool("smb_enum", "List SMB shares via a null session (read-only).",
+             SCHEMA_SMB, smb_enum),
+        Tool("service_intel",
+             "Look up known common misconfigurations and enumeration steps for a "
+             "service. Use this to ground hypotheses.",
+             SCHEMA_INTEL, service_intel),
+    ]
+    return ToolRegistry(host_tools + build_web_tools(simulate=False))

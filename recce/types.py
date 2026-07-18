@@ -42,11 +42,35 @@ class Hypothesis(BaseModel):
     confidence: Confidence = Confidence.medium
 
 
+class Surface(BaseModel):
+    """The wide web attack-surface, when the target is a domain rather than a
+    single host: what was discovered passively and which hosts merit a look.
+    Optional — a host/CTF run leaves this empty and just fills open_ports."""
+
+    subdomains: list[str] = Field(
+        default_factory=list, description="Subdomains discovered (passive)."
+    )
+    live_hosts: list[str] = Field(
+        default_factory=list, description="Hosts that responded to a probe."
+    )
+    priority_hosts: list[str] = Field(
+        default_factory=list,
+        description="Hosts worth testing first (dev/stage/api/admin/internal/etc.).",
+    )
+    notable_urls: list[str] = Field(
+        default_factory=list, description="Interesting historical/known URLs to chase."
+    )
+    waf_notes: str = Field(default="", description="Bot-WAF/CDN read, if checked.")
+
+
 class ReconFindings(BaseModel):
     """The agent's structured hand-off, produced when it calls `conclude`."""
 
     summary: str = Field(description="1-3 sentence read on the target.")
     open_ports: list[Port] = Field(default_factory=list)
+    surface: Optional[Surface] = Field(
+        default=None, description="Web attack-surface map (domain targets only)."
+    )
     hypotheses: list[Hypothesis] = Field(default_factory=list)
 
 
