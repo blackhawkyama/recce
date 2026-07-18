@@ -67,10 +67,15 @@ recce sweep example.com
 # ACTIVE-but-gentle WAF + liveness triage of the priority hosts from a sweep.
 # One GET per host; --authorized gated; --exclude drops out-of-scope patterns.
 recce vet runs/example.com-sweep-*.json --authorized --limit 20 --exclude customer.
+
+# ServiceNow: fingerprint the instance + probe the Table API for the unauth
+# table-ACL exposure class. sys_id-only — proves the misconfig without pulling PII.
+recce snow acme.service-now.com --authorized
 ```
 
 `sweep → vet` gives you a ranked, WAF-vetted target list (clean & alive hosts to
-test first) before you spend a minute in Burp.
+test first) before you spend a minute in Burp. `snow` is a focused check for the
+still-live ServiceNow unauth-data-exposure bug class on an in-scope instance.
 
 Every run saves a JSON artifact and a Markdown write-up under `runs/`. Re-render
 either later:
@@ -112,6 +117,14 @@ gentle):
 | `http_probe` | active, gentle | which hosts are alive — status, Server, title; capped + short-timeout |
 | `wayback_urls` | passive | historical URLs from the Wayback CDX, interesting ones surfaced |
 
+**ServiceNow tools** — check an instance for the unauthenticated table-ACL
+exposure class (`*.service-now.com` shows up constantly in bug-bounty scopes):
+
+| Tool | Line | What it does |
+|---|---|---|
+| `servicenow_fingerprint` | active (benign) | confirm ServiceNow + read public `/stats.do` metadata (instance, build, node) and glide markers |
+| `servicenow_acl_probe` | active, non-exfiltrating | check whether sensitive tables (sys_user, incident, …) are readable unauthenticated via the Table API — requests **only `sys_id`**, so it proves the ACL gap without retrieving PII, then stops for a human to confirm impact |
+
 Web tools are pure stdlib (no extra binaries) and verify TLS with a real CA
 bundle (`certifi`) so passive HTTPS recon works on any machine. Host tools shell
 out and **degrade gracefully** when a binary or the network isn't there.
@@ -127,16 +140,17 @@ recce/
   agent.py         the loop: plan → tool-use → observe → conclude, with recovery
   recon/tools.py   host recon tools (nmap/ftp/smb) + service-intel + simulate mode
   recon/web.py     web-surface recon (subdomain/triage/probe/waf/wayback), passive-first
+  recon/servicenow.py  ServiceNow fingerprint + table-ACL probe (sys_id-only, non-exfiltrating)
   report.py        render the write-up (incl. the attack-surface map) and the trail
-  cli.py           recce scan | replay  (with the authorization gate)
+  cli.py           recce scan | sweep | vet | snow | replay  (with the authorization gate)
 tests/             offline suite — fake model + simulated tools
 ```
 
 ## Status
 
-v0.2 — agent core (loop, tool registry, journal); **two recon halves** (host
-drill + passive-first web-surface mapping) in one registry the agent picks from by
-target shape; structured hand-off with an attack-surface map; write-up renderer;
-CLI with an authorization gate; tested offline (22 tests). Next: a live HTB run,
-optional subfinder/amass depth with API keys, and tightening the hypothesis
-prompt.
+v0.2 — agent core (loop, tool registry, journal); **three recon halves** (host
+drill + passive-first web-surface mapping + a ServiceNow table-ACL check) in one
+registry the agent picks from by target shape; structured hand-off with an
+attack-surface map; write-up renderer; CLI with an authorization gate; tested
+offline (48 tests). Next: a live HTB run, optional subfinder/amass depth with API
+keys, and tightening the hypothesis prompt.

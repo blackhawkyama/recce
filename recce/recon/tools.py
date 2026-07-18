@@ -18,6 +18,7 @@ import subprocess
 from typing import Optional
 from urllib.request import Request, urlopen
 
+from recce.recon.servicenow import build_servicenow_tools
 from recce.recon.web import build_web_tools
 from recce.tools import Tool, ToolRegistry
 from recce.types import ToolResult
@@ -119,6 +120,15 @@ SERVICE_INTEL: dict[str, dict[str, str]] = {
         "note": "Exported shares may be world-readable/writable — a path to drop an "
         "SSH key or read sensitive files.",
         "check": "Show mounts; mount readable exports and inspect.",
+    },
+    "servicenow": {
+        "note": "ServiceNow instances (*.service-now.com) commonly leak records via "
+        "misconfigured table ACLs — sys_user, incident, cmdb_ci, question_answer and "
+        "friends become readable with no session, through the Table REST API or a public "
+        "Service Portal widget / 'Simple List'. /stats.do is usually world-readable and "
+        "fingerprints the build. This is a still-live, widely-scoped bug class.",
+        "check": "Fingerprint via servicenow_fingerprint (/stats.do), then servicenow_acl_probe "
+        "(Table API, sys_id-only — proves the ACL gap without pulling PII).",
     },
 }
 
@@ -269,8 +279,10 @@ def build_registry(simulate: bool = False) -> ToolRegistry:
     Two halves share one registry so the agent can pick by target shape: the
     *host* tools (nmap/http_enum/ftp/smb) drill a single box (an HTB/CTF machine,
     an IP); the *web* tools (subdomain_enum/triage_hosts/http_probe/waf_check/
-    wayback_urls) map the wide surface of a domain, bug-bounty style. See
-    recon/web.py for the passive/active line on the web tools.
+    wayback_urls) map the wide surface of a domain, bug-bounty style; the
+    *servicenow* tools (servicenow_fingerprint/servicenow_acl_probe) check a
+    ServiceNow instance for the unauth table-ACL exposure class. See recon/web.py
+    and recon/servicenow.py for the passive/active line on each.
     """
     if simulate:
         host_tools = [
@@ -288,7 +300,9 @@ def build_registry(simulate: bool = False) -> ToolRegistry:
                  "for a service. Use this to ground hypotheses.",
                  SCHEMA_INTEL, service_intel),
         ]
-        return ToolRegistry(host_tools + build_web_tools(simulate=True))
+        return ToolRegistry(
+            host_tools + build_web_tools(simulate=True) + build_servicenow_tools(simulate=True)
+        )
 
     host_tools = [
         Tool("nmap_scan", "Service/version scan of the target (read-only nmap -sV).",
@@ -304,4 +318,6 @@ def build_registry(simulate: bool = False) -> ToolRegistry:
              "service. Use this to ground hypotheses.",
              SCHEMA_INTEL, service_intel),
     ]
-    return ToolRegistry(host_tools + build_web_tools(simulate=False))
+    return ToolRegistry(
+        host_tools + build_web_tools(simulate=False) + build_servicenow_tools(simulate=False)
+    )

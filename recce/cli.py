@@ -4,6 +4,7 @@
     recce scan demo --simulate               # canned tool output (still calls the model)
     recce sweep example.com                  # passive-only surface map (no model/key)
     recce vet runs/<sweep>.json --authorized # WAF+liveness triage of priority hosts (active, gentle)
+    recce snow acme.service-now.com --authorized  # ServiceNow fingerprint + table-ACL probe
     recce replay runs/<id>.json              # re-render a saved run
 
 Authorization gate: a real scan refuses to start without --authorized. recce only
@@ -261,6 +262,107 @@ def cmd_vet(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_snow(args: argparse.Namespace) -> int:
+    """ServiceNow-focused run: fingerprint the instance (public /stats.do metadata),
+    then probe the Table API for unauthenticated table reads (sys_id-only — proves
+    the ACL misconfig without pulling PII). Sends live requests, so it's --authorized
+    gated. No model/key needed — deterministic checks assembled into a write-up."""
+    from recce.recon.servicenow import acl_probe, fingerprint_instance
+    from recce.types import Confidence, Hypothesis, ReconFindings, ReconRun, Surface
+
+    print(_BANNER, file=sys.stderr)
+    if not args.authorized:
+        sys.exit(
+            "refusing to probe: `snow` sends live requests to the instance's Table API. "
+            "Pass --authorized to confirm this instance is in scope for you to test."
+        )
+
+    host = args.target
+    print(f"\nServiceNow recon: {host}  (in-scope, gentle · sys_id-only probe)\n", file=sys.stderr)
+
+    print("  → servicenow_fingerprint (/stats.do + markers)…", file=sys.stderr)
+    fp = fingerprint_instance(host)
+    if "error" in fp:
+        sys.exit(f"fingerprint failed: {fp['host']}: {fp['error']}")
+    print(f"    ServiceNow={fp['is_servicenow']}  build={fp['build'] or '?'}  "
+          f"stats.do public={fp['stats_public']}", file=sys.stderr)
+
+    tables = None
+    if args.tables:
+        from recce.recon.servicenow import _DEFAULT_TABLES  # noqa: PLC0415
+        known = dict(_DEFAULT_TABLES)
+        names = [t for e in args.tables for t in e.replace(",", " ").split()]
+        tables = [(n, known.get(n, "operator-specified table")) for n in names]
+
+    print("  → servicenow_acl_probe (Table API, sys_id only)…", file=sys.stderr)
+    probe = acl_probe(host, tables)
+    readable = probe.get("readable", [])
+    print(f"    {len(readable)} table(s) readable unauthenticated", file=sys.stderr)
+
+    # Build hypotheses from any exposed tables — evidence, impact, next step.
+    hyps: list[Hypothesis] = []
+    for r in readable:
+        pii = r["table"] in ("sys_user", "question_answer", "incident")
+        hyps.append(Hypothesis(
+            title=f"Unauthenticated read of `{r['table']}`",
+            service="servicenow/https",
+            evidence=f"GET /api/now/table/{r['table']}?sysparm_fields=sys_id&sysparm_limit=1 "
+                     f"returned 200 with a result row (no session).",
+            rationale=f"Table ACL permits anonymous read — {r['desc']}.",
+            suggested_next_step=f"Open the Service Portal 'Simple List' for {r['table']} in a "
+                                "logged-out browser, confirm records render, capture a minimal "
+                                "redacted PoC, and file per program scope. Do not bulk-pull.",
+            confidence=Confidence.high if pii else Confidence.medium,
+        ))
+
+    verdict = ("EXPOSED — unauthenticated table reads confirmed"
+               if readable else "no unauth table reads found")
+    summary = (
+        f"ServiceNow recon of {fp['host']}: "
+        f"{'confirmed' if fp['is_servicenow'] else 'not confirmed'} ServiceNow"
+        + (f" ({fp['build']})" if fp['build'] else "")
+        + f". Table-ACL probe (sys_id-only, no PII pulled): {verdict}"
+        + (f" — {', '.join(r['table'] for r in readable)}." if readable else ".")
+    )
+    surface = Surface(
+        live_hosts=[fp["host"]],
+        priority_hosts=[fp["host"]] if readable else [],
+        waf_notes=(f"instance={fp['instance'] or '?'} build={fp['build'] or '?'} "
+                   f"node={fp['node'] or '?'} stats.do_public={fp['stats_public']}"),
+    )
+    run = ReconRun(
+        target=host, authorized=True, model="(snow — no model)",
+        findings=ReconFindings(summary=summary, surface=surface, hypotheses=hyps),
+        stopped_reason="servicenow recon complete",
+        config={"mode": "snow", "readable_tables": [r["table"] for r in readable]},
+    )
+
+    detail = ["\n## Table-ACL probe (sys_id only — no PII retrieved)", "",
+              "| Signal | Table | Rows | Notes |", "|---|---|---|---|"]
+    for r in probe["results"]:
+        mark = {"READABLE-UNAUTH": "✗ EXPOSED", "requires-auth": "✓ auth",
+                "blocked": "✓ blocked", "no-such-table": "· absent",
+                "unreachable": "· n/a"}.get(r["signal"], r["signal"])
+        rows = "" if r["rows"] is None else f"≥{r['rows']}"
+        detail.append(f"| {mark} | `{r['table']}` | {rows} | {r['desc']} |")
+    writeup = render_writeup(run) + "\n" + "\n".join(detail)
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = run.created_at.replace(":", "").replace("-", "")[:15]
+    slug = host.replace("/", "_").replace(":", "_")
+    json_path = out_dir / f"{slug}-snow-{stamp}.json"
+    md_path = out_dir / f"{slug}-snow-{stamp}.md"
+    json_path.write_text(run.model_dump_json(indent=2))
+    md_path.write_text(writeup)
+
+    print("\n" + "=" * 60)
+    print(writeup)
+    print("=" * 60)
+    print(f"\nsaved: {json_path}  |  {md_path}", file=sys.stderr)
+    return 0 if readable else 1
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     run = ReconRun.model_validate_json(Path(args.run).read_text())
     if args.journal:
@@ -301,6 +403,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="drop hosts containing this substring (repeatable) — for out-of-scope patterns")
     v.add_argument("-o", "--out", default="runs")
     v.set_defaults(func=cmd_vet)
+
+    n = sub.add_parser("snow", help="ServiceNow fingerprint + table-ACL probe (in-scope, --authorized)")
+    n.add_argument("target", help="ServiceNow instance host/URL (e.g. acme.service-now.com)")
+    n.add_argument("--authorized", action="store_true",
+                   help="confirm this instance is in scope for you to actively test")
+    n.add_argument("--tables", action="append",
+                   help="table(s) to probe instead of the default set (repeatable / comma-sep)")
+    n.add_argument("-o", "--out", default="runs")
+    n.set_defaults(func=cmd_snow)
 
     r = sub.add_parser("replay", help="re-render a saved run")
     r.add_argument("run", help="path to a runs/<id>.json")

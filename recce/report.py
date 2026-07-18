@@ -16,6 +16,9 @@ _REMEDIATION = {
     "mysql": "No remote root; strong passwords; bind to localhost where possible.",
     "rsync": "Require auth on modules; restrict read/write; don't expose publicly.",
     "nfs": "Restrict exports by host; no world-writable exports; use NFSv4 + auth.",
+    "servicenow": "Fix table ACLs to deny public/anonymous read; audit Service Portal "
+    "public pages/widgets; set glide.security.strict.actions; run ServiceNow's ACL "
+    "diagnostic and the Explicit Roles plugin review.",
 }
 
 
